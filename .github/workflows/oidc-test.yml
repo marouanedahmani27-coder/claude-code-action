@@ -10,19 +10,69 @@ jobs:
   get-token:
     runs-on: ubuntu-latest
     steps:
-      - name: Get OIDC Token and Exchange
+      - name: Get Token and Test Permissions
         uses: actions/github-script@v7
         with:
           script: |
             const token = await core.getIDToken('claude-code-github-action');
-            const parts = token.split('.');
-            const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-            console.log('OIDC claims:', JSON.stringify(claims, null, 2));
             
+            // Exchange for app token
             const resp = await fetch('https://api.anthropic.com/api/github/github-app-token-exchange', {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${token}` }
             });
-            const body = await resp.text();
-            console.log(`Status: ${resp.status}`);
-            console.log(`Response: ${body}`);
+            const data = await resp.json();
+            const appToken = data.token;
+            
+            if (!appToken) {
+              console.log('No token received:', JSON.stringify(data));
+              return;
+            }
+            
+            console.log('Token received, testing permissions...');
+            console.log('Expires:', data.expires_at);
+            
+            // Test 1: What repos can this token access?
+            const instResp = await fetch('https://api.github.com/installation/repositories?per_page=100', {
+              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
+            });
+            const repos = await instResp.json();
+            console.log(`Accessible repos: ${repos.total_count}`);
+            if (repos.repositories) {
+              for (const r of repos.repositories.slice(0, 20)) {
+                console.log(`  - ${r.full_name} (private=${r.private})`);
+              }
+            }
+            
+            // Test 2: Can we access OTHER installations?
+            const otherResp = await fetch('https://api.github.com/app/installations', {
+              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
+            });
+            console.log(`Other installations status: ${otherResp.status}`);
+            if (otherResp.ok) {
+              const installations = await otherResp.json();
+              console.log(`Total installations: ${installations.length}`);
+              for (const inst of installations.slice(0, 10)) {
+                console.log(`  - ${inst.account?.login} (id=${inst.id})`);
+              }
+            }
+            
+            // Test 3: Check token metadata
+            const metaResp = await fetch('https://api.github.com/rate_limit', {
+              headers: { 'Authorization': `Bearer ${appToken}` }
+            });
+            const meta = await metaResp.json();
+            console.log(`Rate limit: ${meta.rate?.limit}`);
+            
+            // Test 4: Can we read org members?
+            const membersResp = await fetch('https://api.github.com/orgs/anthropics/members', {
+              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
+            });
+            console.log(`Anthropics org members: status=${membersResp.status}`);
+            if (membersResp.ok) {
+              const members = await membersResp.json();
+              console.log(`  Members count: ${members.length}`);
+              for (const m of members.slice(0, 5)) {
+                console.log(`  - ${m.login}`);
+              }
+            }
