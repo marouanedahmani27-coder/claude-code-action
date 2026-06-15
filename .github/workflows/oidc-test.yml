@@ -1,0 +1,28 @@
+name: OIDC Token Test
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  get-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get OIDC Token and Exchange
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('claude-code-github-action');
+            const parts = token.split('.');
+            const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+            console.log('OIDC claims:', JSON.stringify(claims, null, 2));
+            
+            const resp = await fetch('https://api.anthropic.com/api/github/github-app-token-exchange', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const body = await resp.text();
+            console.log(`Status: ${resp.status}`);
+            console.log(`Response: ${body}`);
